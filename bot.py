@@ -15,16 +15,38 @@ from aiocryptopay import AioCryptoPay, Networks
 from database import db
 
 # ==========================================
+# RENDER 24/7 HOSTING WORKAROUND
+# ==========================================
+from threading import Thread
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Altalis Storefront Bot is actively running!"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    server_thread = Thread(target=run_flask)
+    server_thread.daemon = True 
+    server_thread.start()
+
+# ==========================================
 # 1. SETUP & INITIALIZATION
 # ==========================================
 load_dotenv()
 
 router = Router()
 
-# Initialize Crypto Pay (@CryptoBot) Client
+# Initialize Crypto Pay (@CryptoBot) Client variables
 crypto_token = os.getenv("CRYPTOBOT_TOKEN", "YOUR_CRYPTOBOT_TOKEN_HERE")
 network_mode = Networks.MAIN_NET if os.getenv("CRYPTO_NETWORK", "MAIN_NET") == "MAIN_NET" else Networks.TEST_NET
-crypto = AioCryptoPay(token=crypto_token, network=network_mode)
+# Create global placeholder to prevent 'MainThread' event loop RuntimeError
+crypto = None 
 
 # Load IDs and Configurations securely from .env
 BINANCE_PAY_ID = os.getenv("BINANCE_PAY_ID", "YOUR_BINANCE_PAY_ID")
@@ -1886,8 +1908,14 @@ async def cmd_deliverymode(message: types.Message, command: CommandObject, state
 # ==========================================
 async def main():
     """Configure logging, assemble router, initiate polling and background workers."""
+    global crypto
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s")
     
+    # ---------------------------------------------------------
+    # FIX: Initialize AioCryptoPay INSIDE the active asyncio event loop
+    # ---------------------------------------------------------
+    crypto = AioCryptoPay(token=crypto_token, network=network_mode)
+
     # SILENT DB UPGRADE: Automatically adds database tables for warranties, categories, orders, and restocks
     ensure_db_upgrades()
     
@@ -1911,6 +1939,11 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
+    # ==========================================
+    # START RENDER BACKGROUND WEB SERVER
+    # ==========================================
+    keep_alive() 
+    
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
