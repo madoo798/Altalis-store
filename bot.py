@@ -385,9 +385,18 @@ async def auto_verify_invoices(bot: Bot):
             for inv in pending_invoices:
                 try:
                     invoices = await crypto.get_invoices(invoice_ids=inv["invoice_id"])
-                    if invoices:
-                        status = invoices[0].status if isinstance(invoices, list) else invoices.status
-                        if status == "paid":
+                    
+                    # 👇 --- SAFETY CHECKS ADDED HERE --- 👇
+                    if not invoices:
+                        continue
+                    if hasattr(invoices, 'items'):
+                        invoices = invoices.items
+                    elif not isinstance(invoices, list):
+                        invoices = [invoices]
+                    # 👆 ------------------------------- 👆
+
+                    for invoice in invoices:
+                        if invoice.status == "paid":
                             credited = await asyncio.to_thread(db.mark_invoice_paid, inv["invoice_id"])
                             if credited:
                                 user = await asyncio.to_thread(db.get_user, inv["user_id"])
@@ -405,11 +414,14 @@ async def auto_verify_invoices(bot: Bot):
                                     parse_mode="Markdown"
                                 )
                                 logging.info(f"✅ [AUTO-CREDITED] Invoice {inv['invoice_id']} -> User {inv['user_id']} (+${inv['amount_usd']})")
+                
                 except Exception as e:
-                    logging.error(f"Error querying crypto invoice {inv['invoice_id']}: {e}")
+                    logging.exception(f"CryptoPay Error Details for invoice {inv['invoice_id']}:")
+                
                 await asyncio.sleep(1)
+                
         except Exception as e:
-            logging.error(f"Error in background verification loop: {e}")
+            logging.exception("Crash Details in background verification loop:")
         
         await asyncio.sleep(15)
 
