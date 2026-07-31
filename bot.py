@@ -379,7 +379,7 @@ async def auto_verify_invoices(bot: Bot):
     while True:
         try:
             pending_invoices = await asyncio.to_thread(
-                lambda: [dict(row) for row in db._get_connection().execute("SELECT invoice_id, user_id, amount_usd FROM invoices WHERE status = 'pending'").fetchall()]
+                lambda: [{"invoice_id": row[0], "user_id": row[1], "amount_usd": row[2]} for row in db._get_connection().execute("SELECT invoice_id, user_id, amount_usd FROM invoices WHERE status = 'pending'").fetchall()]
             )
             
             for inv in pending_invoices:
