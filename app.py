@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# TURSO CLOUD DATABASE CONNECTION
+# TURSO CLOUD DATABASE CONNECTION & SETUP
 # ==========================================
 TURSO_URL = os.getenv("TURSO_DATABASE_URL", "libsql://altalis-store-madoki.aws-eu-west-1.turso.io")
 TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODU1MjEzNjYsImlkIjoiMDE5ZmI5NWMtYTcwMS03NzY2LWFiYWMtMzlkZjJhMzBkYzgyIiwia2lkIjoieG53aGlueTM1VS1NMnlUeTNZTmJ5LTI0dS1MbXdsbjNNeEZ1cWFoSmhPMCIsInJpZCI6ImJhZjJkYTc0LTNkYjctNDIzMy05MTVhLWMxZmMwZWZhNjA3NiJ9.2o12r3dqEQ7jmWOc7RyILcXQLzuInsZJDXegUh6IR7q6xGwpi7LmySgcBYYXh4W2t2iIOQBIxJZmID6UNqvGBw")
@@ -43,6 +43,65 @@ def get_turso_connection():
         return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
     else:
         return libsql.connect(TURSO_URL)
+
+def init_cloud_db():
+    """Automatically create database tables in Turso if they don't exist."""
+    try:
+        conn = get_turso_connection()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                balance_usd REAL DEFAULT 0.0,
+                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                product_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                price_usd REAL NOT NULL,
+                is_active BOOLEAN DEFAULT 1
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS inventory (
+                item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                is_sold BOOLEAN DEFAULT 0,
+                FOREIGN KEY (product_id) REFERENCES products (product_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                invoice_id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                amount_usd REAL NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                delivered_content TEXT NOT NULL,
+                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                FOREIGN KEY (product_id) REFERENCES products (product_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Init DB Error: {e}")
+
+# Initialize tables on startup
+init_cloud_db()
 
 def get_data(query: str) -> pd.DataFrame:
     """Fetch query results from Turso cloud database as a Pandas DataFrame."""
