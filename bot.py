@@ -151,20 +151,22 @@ def get_active_products() -> List[Dict[str, Any]]:
     """Query the SQLite database for all currently active store products."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT * FROM products WHERE is_active = 1")
-        return [dict(row) for row in cursor.fetchall()]
+        cols = [col[0] for col in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
 def get_all_categories() -> List[str]:
     """Retrieve all unique product category folders currently active in the store."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT DISTINCT category FROM products WHERE is_active = 1")
-        cats = [dict(row)["category"] for row in cursor.fetchall() if dict(row).get("category")]
+        cats = [row[0] for row in cursor.fetchall() if row[0]]
         return cats if cats else ["General"]
 
 def get_products_by_category(category_name: str) -> List[Dict[str, Any]]:
     """Query active products belonging to a specific category."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT * FROM products WHERE is_active = 1 AND category = ?", (category_name,))
-        return [dict(row) for row in cursor.fetchall()]
+        cols = [col[0] for col in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
 def add_restock_subscriber(product_id: int, user_id: int) -> bool:
     """Subscribe a user to receive an instant DM alert when an out-of-stock item is restocked."""
@@ -180,7 +182,7 @@ def get_and_clear_restock_subscribers(product_id: int) -> List[int]:
     """Retrieve all users waiting for a restock alert and clear them from the queue."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT user_id FROM restock_subscribers WHERE product_id = ?", (product_id,))
-        users = [dict(row)["user_id"] for row in cursor.fetchall()]
+        users = [row[0] for row in cursor.fetchall()]
         if users:
             conn.execute("DELETE FROM restock_subscribers WHERE product_id = ?", (product_id,))
         return users
@@ -200,23 +202,24 @@ def get_customer_orders(user_id: int) -> List[Dict[str, Any]]:
     """Retrieve all past purchases for a specific customer."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT * FROM customer_orders WHERE user_id = ? ORDER BY purchased_at DESC", (user_id,))
-        return [dict(row) for row in cursor.fetchall()]
+        cols = [col[0] for col in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
 def get_store_analytics() -> Dict[str, Any]:
     """Calculate core store analytics for the admin dashboard."""
     with db._get_connection() as conn:
-        rev_cursor = conn.execute("SELECT SUM(price_usd) as total_rev, COUNT(*) as total_orders FROM customer_orders")
+        rev_cursor = conn.execute("SELECT SUM(price_usd), COUNT(*) FROM customer_orders")
         rev_row = rev_cursor.fetchone()
-        total_revenue = rev_row["total_rev"] if rev_row and rev_row["total_rev"] else 0.0
-        total_orders = rev_row["total_orders"] if rev_row and rev_row["total_orders"] else 0
+        total_revenue = rev_row[0] if rev_row and rev_row[0] else 0.0
+        total_orders = rev_row[1] if rev_row and rev_row[1] else 0
         
-        user_cursor = conn.execute("SELECT COUNT(*) as total_users FROM users")
+        user_cursor = conn.execute("SELECT COUNT(*) FROM users")
         user_row = user_cursor.fetchone()
-        total_users = user_row["total_users"] if user_row and user_row["total_users"] else 0
+        total_users = user_row[0] if user_row and user_row[0] else 0
         
-        prod_cursor = conn.execute("SELECT COUNT(*) as total_prods FROM products WHERE is_active = 1")
+        prod_cursor = conn.execute("SELECT COUNT(*) FROM products WHERE is_active = 1")
         prod_row = prod_cursor.fetchone()
-        total_products = prod_row["total_prods"] if prod_row and prod_row["total_prods"] else 0
+        total_products = prod_row[0] if prod_row and prod_row[0] else 0
         
         return {
             "revenue": total_revenue,
@@ -234,7 +237,7 @@ def add_user_balance(user_id: int, amount_usd: float) -> float:
         )
         cursor = conn.execute("SELECT balance_usd FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        return row["balance_usd"] if row else 0.0
+        return row[0] if row else 0.0
 
 def append_product_description(product_id: int, added_text: str) -> bool:
     """Safely append additional information to an already existing product description."""
@@ -243,7 +246,7 @@ def append_product_description(product_id: int, added_text: str) -> bool:
         row = cursor.fetchone()
         if not row:
             return False
-        current_desc = dict(row)["description"]
+        current_desc = row[0]
         new_desc = f"{current_desc}\n\n➕ **Update:** {added_text}"
         conn.execute("UPDATE products SET description = ? WHERE product_id = ?", (new_desc, product_id))
         return True
@@ -265,7 +268,7 @@ async def broadcast_to_users(bot: Bot, text: str, reply_markup: InlineKeyboardMa
     """Safely broadcast a notification directly to all registered users in their private chat (Non-Blocking)."""
     with db._get_connection() as conn:
         cursor = conn.execute("SELECT user_id FROM users")
-        user_ids = [dict(row)["user_id"] for row in cursor.fetchall()]
+        user_ids = [row[0] for row in cursor.fetchall()]
         
     success_count = 0
     for user_id in user_ids:
@@ -386,14 +389,12 @@ async def auto_verify_invoices(bot: Bot):
                 try:
                     invoices = await crypto.get_invoices(invoice_ids=inv["invoice_id"])
                     
-                    # 👇 --- SAFETY CHECKS ADDED HERE --- 👇
                     if not invoices:
                         continue
                     if hasattr(invoices, 'items'):
                         invoices = invoices.items
                     elif not isinstance(invoices, list):
                         invoices = [invoices]
-                    # 👆 ------------------------------- 👆
 
                     for invoice in invoices:
                         if invoice.status == "paid":
@@ -1733,7 +1734,7 @@ async def cmd_delproduct(message: types.Message, command: CommandObject, state: 
                 row = cursor.fetchone()
                 if not row:
                     return None
-                p_name = dict(row)["name"]
+                p_name = row[0]
                 conn.execute("DELETE FROM inventory WHERE product_id = ?", (product_id,))
                 conn.execute("DELETE FROM products WHERE product_id = ?", (product_id,))
                 conn.execute("DELETE FROM restock_subscribers WHERE product_id = ?", (product_id,))
@@ -1770,7 +1771,7 @@ async def cmd_clearstock(message: types.Message, command: CommandObject, state: 
                 row = cursor.fetchone()
                 if not row:
                     return None, 0
-                p_name = dict(row)["name"]
+                p_name = row[0]
                 cursor = conn.execute("DELETE FROM inventory WHERE product_id = ?", (product_id,))
                 return p_name, cursor.rowcount
 
@@ -1845,7 +1846,7 @@ async def cmd_liststock(message: types.Message, command: CommandObject, state: F
                 row = cursor.fetchone()
                 if not row:
                     return None, []
-                p_name = dict(row)["name"]
+                p_name = row[0]
                 
                 cursor = conn.execute("PRAGMA table_info(inventory)")
                 columns = [col["name"] for col in cursor.fetchall()]
@@ -1858,7 +1859,7 @@ async def cmd_liststock(message: types.Message, command: CommandObject, state: F
                     query = f"SELECT {text_col} FROM inventory WHERE product_id = ?"
                     
                 cursor = conn.execute(query, (product_id,))
-                return p_name, [dict(r)[text_col] for r in cursor.fetchall()]
+                return p_name, [r[0] for r in cursor.fetchall()]
 
         product_name, items = await asyncio.to_thread(_get_stock_list)
         if not product_name:
