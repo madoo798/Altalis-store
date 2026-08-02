@@ -235,6 +235,7 @@ def add_user_balance(user_id: int, amount_usd: float) -> float:
             "UPDATE users SET balance_usd = balance_usd + ? WHERE user_id = ?",
             (amount_usd, user_id)
         )
+        conn.commit()
         cursor = conn.execute("SELECT balance_usd FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         return row[0] if row else 0.0
@@ -286,6 +287,30 @@ async def broadcast_to_users(bot: Bot, text: str, reply_markup: InlineKeyboardMa
             
     logging.info(f"📣 Private DM broadcast successfully delivered to {success_count}/{len(user_ids)} users.")
 
+async def safe_register_user(user_id: int, username: str) -> str:
+    """Registers user safely, handles the Turso race condition, and applies promo."""
+    existing_user = await asyncio.to_thread(db.get_user, user_id)
+    
+    if existing_user:
+        await asyncio.to_thread(db.add_user, user_id=user_id, username=username)
+        return "existing"
+
+    # Get total users BEFORE adding this one
+    stats = await asyncio.to_thread(get_store_analytics)
+    total_users = stats.get("users", 0)
+
+    # 1. Insert the new user
+    await asyncio.to_thread(db.add_user, user_id=user_id, username=username)
+    
+    # 2. Pause for 0.5s to ensure the Turso cloud DB fully commits the INSERT
+    await asyncio.sleep(0.5)
+
+    # 3. Apply the promo if eligible
+    if total_users < 100:
+        await asyncio.to_thread(add_user_balance, user_id=user_id, amount_usd=1.0)
+        return "promo"
+    
+    return "new"
 
 # ==========================================
 # 4. KEYBOARD BUILDERS
@@ -486,36 +511,23 @@ async def cmd_start(message: types.Message, state: FSMContext):
             )
             return
 
-    # 1. Check if the user already exists in the database
-    existing_user = await asyncio.to_thread(db.get_user, message.from_user.id)
+    status = await safe_register_user(message.from_user.id, message.from_user.username)
 
-    if not existing_user:
-        # 2. Get current user count before adding
-        stats = await asyncio.to_thread(get_store_analytics)
-        total_users = stats.get("users", 0)
-
-        # 3. Add user to database
-        await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
-
-        # 4. Check if they qualify for the $1.00 starting balance (First 100 users)
-        if total_users < 100:
-            await asyncio.to_thread(add_user_balance, user_id=message.from_user.id, amount_usd=1.0)
-            welcome_msg = (
-                "🎉 **Welcome to Altalis & Celesta!**\n\n"
-                "Congratulations! You are one of our first 100 users. "
-                "We have credited **$1.00 USD** to your wallet for free! 🎁\n\n"
-                "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
-                "Select an option below to begin:"
-            )
-        else:
-            welcome_msg = (
-                "👋 **Welcome to the Digital Storefront!**\n\n"
-                "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
-                "Select an option below to begin:"
-            )
+    if status == "promo":
+        welcome_msg = (
+            "🎉 **Welcome to Altalis & Celesta!**\n\n"
+            "Congratulations! You are one of our first 100 users. "
+            "We have credited **$1.00 USD** to your wallet for free! 🎁\n\n"
+            "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
+            "Select an option below to begin:"
+        )
+    elif status == "new":
+        welcome_msg = (
+            "👋 **Welcome to the Digital Storefront!**\n\n"
+            "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
+            "Select an option below to begin:"
+        )
     else:
-        # User already exists, update username if needed and send standard welcome back
-        await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
         welcome_msg = (
             "👋 **Welcome back to the Digital Storefront!**\n\n"
             "Select an option below to manage your wallet or browse available digital inventory:"
@@ -552,7 +564,7 @@ async def cmd_restart(message: types.Message, state: FSMContext):
             )
             return
 
-    await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
+    await safe_register_user(message.from_user.id, message.from_user.username)
     
     await message.answer(
         "👋 **Digital Storefront**\n\nSelect an option below to manage your wallet or browse available digital inventory:",
@@ -584,7 +596,7 @@ async def cb_menu_main(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer("⚠️ You must subscribe to the channel first!", show_alert=True)
             return
 
-    await asyncio.to_thread(db.add_user, user_id=callback.from_user.id, username=callback.from_user.username)
+    await safe_register_user(callback.from_user.id, callback.from_user.username)
     
     await callback.message.edit_text(
         "👋 **Digital Storefront**\n\nSelect an option below to manage your wallet or browse available digital inventory:",
@@ -599,7 +611,7 @@ async def cb_menu_profile(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     user = await asyncio.to_thread(db.get_user, callback.from_user.id)
     if not user:
-        await asyncio.to_thread(db.add_user, callback.from_user.id, callback.from_user.username)
+        await safe_register_user(callback.from_user.id, callback.from_user.username)
         user = await asyncio.to_thread(db.get_user, callback.from_user.id)
         
     balance = user["balance_usd"] if user else 0.0
@@ -1136,7 +1148,7 @@ async def cb_buy_product(callback: types.CallbackQuery, state: FSMContext):
     
     user = await asyncio.to_thread(db.get_user, user_id)
     if not user:
-        await asyncio.to_thread(db.add_user, user_id, callback.from_user.username)
+        await safe_register_user(user_id, username)
         user = await asyncio.to_thread(db.get_user, user_id)
         
     products = await asyncio.to_thread(get_active_products)
