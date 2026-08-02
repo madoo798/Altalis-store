@@ -23,7 +23,7 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
     :root {
-        --bg:        #0B0E13;
+        --bg:       #0B0E13;
         --panel:     #12161E;
         --panel-2:   #171C26;
         --hairline:  #2A3140;
@@ -565,7 +565,8 @@ elif selected == "Users & Balances":
     st.markdown("Inspect registered customers and adjust wallet funds.")
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    users_df = get_data("SELECT * FROM users ORDER BY registered_at DESC LIMIT 100")
+    # Fixed explicit column selection query to prevent table column shifting
+    users_df = get_data("SELECT user_id, username, balance_usd, registered_at FROM users ORDER BY registered_at DESC LIMIT 100")
     if not users_df.empty:
         st.dataframe(users_df, use_container_width=True)
 
