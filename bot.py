@@ -459,7 +459,7 @@ async def check_low_stock_watcher(bot: Bot):
 # ==========================================
 @router.message(Command("start"), ThrottlingFilter())
 async def cmd_start(message: types.Message, state: FSMContext):
-    """Register user on startup, check mandatory subscription, set permanent bottom anchor, and display main menu."""
+    """Register user on startup, grant promo balance if eligible, and display main menu."""
     await state.clear()
     
     await message.answer(
@@ -486,12 +486,43 @@ async def cmd_start(message: types.Message, state: FSMContext):
             )
             return
 
-    await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
+    # 1. Check if the user already exists in the database
+    existing_user = await asyncio.to_thread(db.get_user, message.from_user.id)
+
+    if not existing_user:
+        # 2. Get current user count before adding
+        stats = await asyncio.to_thread(get_store_analytics)
+        total_users = stats.get("users", 0)
+
+        # 3. Add user to database
+        await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
+
+        # 4. Check if they qualify for the $1.00 starting balance (First 100 users)
+        if total_users < 100:
+            await asyncio.to_thread(add_user_balance, user_id=message.from_user.id, amount_usd=1.0)
+            welcome_msg = (
+                "🎉 **Welcome to Altalis & Celesta!**\n\n"
+                "Congratulations! You are one of our first 100 users. "
+                "We have credited **$1.00 USD** to your wallet for free! 🎁\n\n"
+                "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
+                "Select an option below to begin:"
+            )
+        else:
+            welcome_msg = (
+                "👋 **Welcome to the Digital Storefront!**\n\n"
+                "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
+                "Select an option below to begin:"
+            )
+    else:
+        # User already exists, update username if needed and send standard welcome back
+        await asyncio.to_thread(db.add_user, user_id=message.from_user.id, username=message.from_user.username)
+        welcome_msg = (
+            "👋 **Welcome back to the Digital Storefront!**\n\n"
+            "Select an option below to manage your wallet or browse available digital inventory:"
+        )
     
     await message.answer(
-        "👋 **Welcome to the Digital Storefront!**\n\n"
-        "Top up your wallet balance instantly using cryptocurrency via `@CryptoBot` or zero-fee transfers via **Binance Pay**, browse available subscriptions and software keys, and receive instant delivery upon checkout.\n\n"
-        "Select an option below to begin:",
+        welcome_msg,
         reply_markup=get_main_menu_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
