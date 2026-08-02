@@ -242,6 +242,17 @@ def init_cloud_db():
                 FOREIGN KEY (product_id) REFERENCES products (product_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS customer_orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                product_name TEXT,
+                price_usd REAL,
+                deliverable TEXT,
+                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -379,7 +390,7 @@ if selected == "Overview":
         st.subheader("Recent Orders")
         orders_df = get_data("SELECT * FROM orders ORDER BY purchased_at DESC LIMIT 5")
         if not orders_df.empty:
-            st.dataframe(orders_df, use_container_width=True)
+            st.dataframe(orders_df, use_container_width=True, hide_index=True)
         else:
             st.info("No orders recorded yet.")
 
@@ -387,7 +398,7 @@ if selected == "Overview":
         st.subheader("Recent Paid Invoices")
         invoices_df = get_data("SELECT * FROM invoices WHERE status = 'paid' ORDER BY created_at DESC LIMIT 5")
         if not invoices_df.empty:
-            st.dataframe(invoices_df, use_container_width=True)
+            st.dataframe(invoices_df, use_container_width=True, hide_index=True)
         else:
             st.info("No paid invoices found.")
 
@@ -406,7 +417,7 @@ elif selected == "Products & Stock":
     with tab1:
         products_df = get_data("SELECT * FROM products")
         if not products_df.empty:
-            st.dataframe(products_df, use_container_width=True)
+            st.dataframe(products_df, use_container_width=True, hide_index=True)
         else:
             st.info("No products available.")
 
@@ -498,7 +509,7 @@ elif selected == "Orders":
     with tab_log:
         orders_df = get_data("SELECT * FROM orders ORDER BY purchased_at DESC LIMIT 100")
         if not orders_df.empty:
-            st.dataframe(orders_df, use_container_width=True)
+            st.dataframe(orders_df, use_container_width=True, hide_index=True)
         else:
             st.info("No orders found in the database.")
             
@@ -507,11 +518,11 @@ elif selected == "Orders":
         st.markdown("Select a user and a product. This will pull **one unit** from your unsold stock, assign it to the user, and reveal the key so you can DM it to them. **(Their wallet balance will NOT be charged)**.")
         
         with st.form("manual_fulfill_form"):
-            target_user = st.number_input("Customer Telegram ID", min_value=1, step=1)
-            
+            target_user = st.number_input("Customer Telegram ID", min_value=1, step=1, format="%d")
+
             # Get products list for dropdown
             products_list = get_data("SELECT product_id, name FROM products WHERE is_active = 1")
-            
+
             if not products_list.empty:
                 prod_dict = {row['name']: row['product_id'] for _, row in products_list.iterrows()}
                 selected_prod = st.selectbox("Select Product to Give", list(prod_dict.keys()))
@@ -519,42 +530,69 @@ elif selected == "Orders":
             else:
                 st.warning("No active products available.")
                 prod_id = None
-                
+
+            confirm_gift = st.checkbox("I've verified this Telegram ID is correct.")
             submit_gift = st.form_submit_button("Grant Access & Extract Key")
-            
-            if submit_gift and prod_id:
-                conn = get_turso_connection()
-                cursor = conn.cursor()
-                
-                # 1. Grab one unsold key from inventory
-                cursor.execute("SELECT item_id, content FROM inventory WHERE product_id = ? AND (is_sold = 0 OR is_sold IS NULL) LIMIT 1", (prod_id,))
-                stock_item = cursor.fetchone()
-                
-                if stock_item:
-                    item_id, delivered_content = stock_item
-                    
-                    # 2. Mark that specific item as sold
-                    cursor.execute("UPDATE inventory SET is_sold = 1 WHERE item_id = ?", (item_id,))
-                    
-                    # 3. Log to standard `orders` table
-                    cursor.execute("INSERT INTO orders (user_id, product_id, delivered_content) VALUES (?, ?, ?)", (target_user, prod_id, delivered_content))
-                    
-                    # 4. Attempt to log to `customer_orders` (the table used by the Bot's /myorders command)
-                    cursor.execute("SELECT price_usd FROM products WHERE product_id = ?", (prod_id,))
-                    price_row = cursor.fetchone()
-                    price = price_row[0] if price_row else 0.0
-                    try:
-                        cursor.execute("INSERT INTO customer_orders (user_id, product_name, price_usd, deliverable) VALUES (?, ?, ?, ?)", (target_user, selected_prod, price, delivered_content))
-                    except Exception:
-                        pass # Silently pass if this table doesn't exist yet
-                        
-                    conn.commit()
-                    st.success(f"🎉 Successfully fulfilled! {selected_prod} assigned to User {target_user}.")
-                    st.info(f"🔑 **Extracted Key/Link:** `{delivered_content}`\n\n*(Copy this key and DM it to the user)*")
+
+            if submit_gift:
+                if not prod_id:
+                    st.error("No product selected.")
+                elif not confirm_gift:
+                    st.error("Please confirm the Telegram ID before extracting a key — this action cannot be undone.")
                 else:
-                    st.error(f"❌ OUT OF STOCK: There are no unsold keys left for {selected_prod}.")
-                    
-                conn.close()
+                    conn = get_turso_connection()
+                    cursor = conn.cursor()
+                    try:
+                        # Take a write lock immediately so two concurrent fulfillments
+                        # can't both grab the same "unsold" item.
+                        cursor.execute("BEGIN IMMEDIATE")
+
+                        cursor.execute(
+                            "SELECT item_id, content FROM inventory "
+                            "WHERE product_id = ? AND (is_sold = 0 OR is_sold IS NULL) LIMIT 1",
+                            (prod_id,)
+                        )
+                        stock_item = cursor.fetchone()
+
+                        if not stock_item:
+                            conn.rollback()
+                            st.error(f"❌ OUT OF STOCK: There are no unsold keys left for {selected_prod}.")
+                        else:
+                            item_id, delivered_content = stock_item
+
+                            # Claim the item; rowcount confirms nobody else claimed it first.
+                            cursor.execute(
+                                "UPDATE inventory SET is_sold = 1 "
+                                "WHERE item_id = ? AND (is_sold = 0 OR is_sold IS NULL)",
+                                (item_id,)
+                            )
+                            if cursor.rowcount != 1:
+                                conn.rollback()
+                                st.error("⚠️ That key was just claimed by another action. Please try again.")
+                            else:
+                                cursor.execute(
+                                    "INSERT INTO orders (user_id, product_id, delivered_content) VALUES (?, ?, ?)",
+                                    (target_user, prod_id, delivered_content)
+                                )
+
+                                cursor.execute("SELECT price_usd FROM products WHERE product_id = ?", (prod_id,))
+                                price_row = cursor.fetchone()
+                                price = price_row[0] if price_row else 0.0
+
+                                cursor.execute(
+                                    "INSERT INTO customer_orders (user_id, product_name, price_usd, deliverable) "
+                                    "VALUES (?, ?, ?, ?)",
+                                    (target_user, selected_prod, price, delivered_content)
+                                )
+
+                                conn.commit()
+                                st.success(f"🎉 Successfully fulfilled! {selected_prod} assigned to User {target_user}.")
+                                st.info(f"🔑 **Extracted Key/Link:** `{delivered_content}`\n\n*(Copy this key and DM it to the user)*")
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"❌ Fulfillment failed and was rolled back: {e}")
+                    finally:
+                        conn.close()
 
 # ==========================================
 # 4. USERS & BALANCES
@@ -565,10 +603,10 @@ elif selected == "Users & Balances":
     st.markdown("Inspect registered customers and adjust wallet funds.")
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # Fixed explicit column selection query to prevent table column shifting
+    # Fixed explicit column selection query and hidden index to prevent column shifting
     users_df = get_data("SELECT user_id, username, balance_usd, registered_at FROM users ORDER BY registered_at DESC LIMIT 100")
     if not users_df.empty:
-        st.dataframe(users_df, use_container_width=True)
+        st.dataframe(users_df, use_container_width=True, hide_index=True)
 
         st.markdown("<hr>", unsafe_allow_html=True)
         st.subheader("Modify User Wallet Balance")
@@ -598,6 +636,6 @@ elif selected == "Invoices":
 
     invoices_df = get_data("SELECT * FROM invoices ORDER BY created_at DESC LIMIT 100")
     if not invoices_df.empty:
-        st.dataframe(invoices_df, use_container_width=True)
+        st.dataframe(invoices_df, use_container_width=True, hide_index=True)
     else:
         st.info("No invoices logged yet.")
