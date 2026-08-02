@@ -1526,7 +1526,7 @@ async def cmd_modifydescription(message: types.Message, command: CommandObject, 
     if not command.args:
         await message.answer(
             "⚠️ **Usage:** `/modifydescription <product_id> <additional_information>`\n"
-            "**Example:** `/modifydescription 1 Includes automatic renewal instructions and private guide.`", 
+            "**Example:** `/modifydescription 1 Includes 24/7 priority customer support.`", 
             parse_mode="Markdown"
         )
         return
@@ -1655,23 +1655,38 @@ async def cmd_addproduct(message: types.Message, command: CommandObject, state: 
 
 
 @router.message(Command("addstock"), IsAdmin(), ThrottlingFilter())
-async def cmd_addstock(message: types.Message, command: CommandObject, state: FSMContext):
-    """Admin tool: Add inventory, broadcast restock alerts to waiting buyers, and notify all users."""
+async def cmd_addstock(message: types.Message, state: FSMContext):
+    """Admin tool: Add bulk inventory, broadcast restock alerts to waiting buyers, and notify all users."""
     await state.clear()
-    if not command.args:
-        await message.answer("⚠️ **Usage:** `/addstock <product_id> <deliverable_content>`\n**Example:** `/addstock 1 https://invite.link/private-access-token`", parse_mode="Markdown")
-        return
-        
-    parts = command.args.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("⚠️ You must provide both the target Product ID and the digital item content.")
+    
+    # Split message by newlines to automatically detect bulk text blocks
+    lines = message.text.strip().split('\n')
+    first_line = lines[0].split()
+    
+    if len(first_line) < 2:
+        await message.answer(
+            "⚠️ **Usage:**\n`/addstock <product_id>`\n`KEY-1`\n`KEY-2`\n\n"
+            "**Example:**\n`/addstock 1`\n`https://link1.com`\n`https://link2.com`", 
+            parse_mode="Markdown"
+        )
         return
         
     try:
-        product_id = int(parts[0])
-        content = parts[1]
+        product_id = int(first_line[1])
         
-        added_count = await asyncio.to_thread(db.add_stock, product_id=product_id, deliverables=[content])
+        # Extract items from subsequent lines, ignoring completely empty ones
+        stock_items = [line.strip() for line in lines[1:] if line.strip()]
+        
+        # Fallback for the old single-line method: /addstock 1 SOME-KEY
+        if len(first_line) > 2 and not stock_items:
+            stock_items = [" ".join(first_line[2:])]
+            
+        if not stock_items:
+            await message.answer("❌ You didn't provide any stock items to add.")
+            return
+            
+        # Push the full list directly to database.py
+        added_count = await asyncio.to_thread(db.add_stock, product_id=product_id, deliverables=stock_items)
         total_stock = await asyncio.to_thread(db.get_stock_count, product_id)
         
         await message.answer(f"📦 **Inventory Updated!**\nAdded `{added_count}` digital unit(s) to Product ID `{product_id}`.\n**Total Available Stock:** `{total_stock} units`", parse_mode="Markdown")
