@@ -310,7 +310,7 @@ async def safe_register_user(user_id: int, username: str, referrer_id: int = Non
     # 2. Pause for 0.5s to ensure the Turso cloud DB fully commits the INSERT
     await asyncio.sleep(0.5)
 
-    # 3. Handle Referral Logic securely
+    # 3. Handle Referral Milestone Logic
     if referrer_id and referrer_id != user_id:
         # Verify the referrer is an actual registered user in the DB before crediting any funds
         referrer_data = await asyncio.to_thread(db.get_user, referrer_id)
@@ -320,11 +320,18 @@ async def safe_register_user(user_id: int, username: str, referrer_id: int = Non
                 conn.execute("UPDATE users SET referred_by = ? WHERE user_id = ?", (referrer_id, user_id))
                 conn.commit()
                 
-            reward_amount = 0.50 # Referral Reward Setting
-            await asyncio.to_thread(add_user_balance, user_id=referrer_id, amount_usd=reward_amount)
-            
-            # Return a special flag so we can notify the referrer in the command handler
-            return f"new_referred_{referrer_id}_{reward_amount}"
+                # Count how many users this person has referred in total
+                cursor = conn.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (referrer_id,))
+                total_referrals = cursor.fetchone()[0]
+                
+            # If the total referrals is a multiple of 5, give the reward
+            if total_referrals > 0 and total_referrals % 5 == 0:
+                reward_amount = 0.50 # Reward per 5 users
+                await asyncio.to_thread(add_user_balance, user_id=referrer_id, amount_usd=reward_amount)
+                return f"rewarded_referral_{referrer_id}_{reward_amount}_{total_referrals}"
+            else:
+                # Flag to notify them of their progress
+                return f"progress_referral_{referrer_id}_{total_referrals}"
 
     # 4. Apply the promo if eligible
     if total_users < 100:
@@ -542,25 +549,47 @@ async def cmd_start(message: types.Message, state: FSMContext, command: CommandO
 
     status = await safe_register_user(message.from_user.id, message.from_user.username, referrer_id)
 
-    # Handle Referral Reward Notification
-    if status.startswith("new_referred_"):
+    # Handle Referral Milestone Reward Notification
+    if status.startswith("rewarded_referral_"):
         parts = status.split("_")
         actual_referrer_id = int(parts[2])
         reward_amount = float(parts[3])
+        total_refs = int(parts[4])
         
         try:
             await message.bot.send_message(
                 chat_id=actual_referrer_id,
                 text=(
-                    f"🎉 **Referral Success!**\n\n"
-                    f"Someone just joined Altalis & Celesta using your invite link. "
-                    f"**${reward_amount:.2f} USD** has been automatically deposited into your wallet balance!\n\n"
+                    f"🎉 **Referral Milestone Reached!**\n\n"
+                    f"You have referred a total of **{total_refs} users** to Altalis & Celesta! "
+                    f"**${reward_amount:.2f} USD** has been automatically deposited into your wallet balance.\n\n"
                     f"Keep sharing your link from the **🎁 Invite Friends** menu to earn more!"
                 ),
                 parse_mode="Markdown"
             )
         except Exception as e:
             logging.warning(f"Could not send reward notification to referrer {actual_referrer_id}: {e}")
+        status = "new"
+
+    # Handle Referral Progress Notification
+    elif status.startswith("progress_referral_"):
+        parts = status.split("_")
+        actual_referrer_id = int(parts[2])
+        total_refs = int(parts[3])
+        refs_needed = 5 - (total_refs % 5)
+        
+        try:
+            await message.bot.send_message(
+                chat_id=actual_referrer_id,
+                text=(
+                    f"🤝 **New Referral Joined!**\n\n"
+                    f"Someone just joined using your invite link! You currently have **{total_refs}** referral(s).\n"
+                    f"Invite **{refs_needed} more** user(s) to receive your next **$0.50 USD** wallet credit!"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.warning(f"Could not send progress notification to referrer {actual_referrer_id}: {e}")
         status = "new"
 
     if status == "promo":
@@ -599,7 +628,7 @@ async def cb_menu_referral(callback: types.CallbackQuery, state: FSMContext):
     
     text = (
         f"🤝 **Invite Friends & Earn!**\n\n"
-        f"Share your unique link below. When a new user starts the bot using your link, "
+        f"Share your unique link below. For every **5 new users** who start the bot using your link, "
         f"you will automatically receive **$0.50 USD** directly into your wallet balance!\n\n"
         f"🔗 `{ref_link}`"
     )
