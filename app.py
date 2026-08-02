@@ -400,7 +400,8 @@ elif selected == "Products & Stock":
     st.markdown("Manage your digital catalog and upload license keys or deliverables.")
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    tab1, tab2 = st.tabs(["Active Catalog", "Add New Product / Stock"])
+    # Added Tab 3 here
+    tab1, tab2, tab3 = st.tabs(["Active Catalog", "Add New Product / Stock", "Edit Product"])
 
     with tab1:
         products_df = get_data("SELECT * FROM products")
@@ -454,6 +455,34 @@ elif selected == "Products & Stock":
                             st.warning("Please paste at least one valid key.")
             else:
                 st.info("Create a product first before adding stock.")
+
+    with tab3:
+        st.subheader("Edit Existing Product")
+        
+        # Fetch products including their current descriptions
+        edit_products_list = get_data("SELECT product_id, name, description FROM products")
+        
+        if not edit_products_list.empty:
+            # Map product names to their ID and current description
+            edit_prod_dict = {row['name']: (row['product_id'], row['description']) for _, row in edit_products_list.iterrows()}
+            
+            selected_edit_prod = st.selectbox("Select Product to Edit", list(edit_prod_dict.keys()))
+            prod_id_to_edit, current_desc = edit_prod_dict[selected_edit_prod]
+            
+            with st.form("edit_desc_form"):
+                # Pre-fill the text area with the existing database description
+                new_desc = st.text_area("Product Description", value=current_desc if current_desc else "", height=250)
+                submit_edit = st.form_submit_button("Save Changes")
+                
+                if submit_edit:
+                    success = execute_query("UPDATE products SET description = ? WHERE product_id = ?", (new_desc, prod_id_to_edit))
+                    if success:
+                        st.success(f"✅ Successfully updated the description for {selected_edit_prod}!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to update the description in the database.")
+        else:
+            st.info("No active products available to edit.")
 
 # ==========================================
 # 3. ORDERS (FULFILLMENT & GIFTING)
