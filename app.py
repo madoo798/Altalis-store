@@ -410,60 +410,122 @@ elif selected == "Products & Stock":
             st.info("No products available.")
 
     with tab2:
-        st.subheader("Create a New Product")
-        with st.form("new_product_form"):
-            prod_name = st.text_input("Product Name")
-            prod_desc = st.text_area("Description")
-            prod_price = st.number_input("Price (USD)", min_value=0.0, step=0.10)
-            submitted = st.form_submit_button("Add Product")
+        col_prod, col_stock = st.columns(2)
+        
+        with col_prod:
+            st.subheader("Create a New Product")
+            with st.form("new_product_form"):
+                prod_name = st.text_input("Product Name")
+                prod_desc = st.text_area("Description")
+                prod_price = st.number_input("Price (USD)", min_value=0.0, step=0.10)
+                submitted = st.form_submit_button("Add Product")
 
-            if submitted and prod_name:
-                conn = get_turso_connection()
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO products (name, description, price_usd) VALUES (?, ?, ?)", (prod_name, prod_desc, prod_price))
-                conn.commit()
-                conn.close()
-                st.success(f"Product '{prod_name}' successfully added to Turso cloud!")
-                st.rerun()
-
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.subheader("Add Stock / Deliverables to Product")
-        products_list = get_data("SELECT product_id, name FROM products")
-
-        if not products_list.empty:
-            product_options = {row['name']: row['product_id'] for _, row in products_list.iterrows()}
-            selected_prod_name = st.selectbox("Select Product", list(product_options.keys()))
-            selected_prod_id = product_options[selected_prod_name]
-
-            stock_content = st.text_area("Deliverables (Put each account/key/link on a new line)")
-            if st.button("Upload Stock"):
-                if stock_content.strip():
-                    lines = [line.strip() for line in stock_content.split("\n") if line.strip()]
+                if submitted and prod_name:
                     conn = get_turso_connection()
-                    data_to_insert = [(selected_prod_id, line) for line in lines]
-                    conn.executemany("INSERT INTO inventory (product_id, content) VALUES (?, ?)", data_to_insert)
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO products (name, description, price_usd) VALUES (?, ?, ?)", (prod_name, prod_desc, prod_price))
                     conn.commit()
                     conn.close()
-                    st.success(f"Successfully added {len(lines)} stock items to {selected_prod_name}!")
-                else:
-                    st.warning("Please enter valid inventory text.")
-        else:
-            st.info("Create a product first before adding stock.")
+                    st.success(f"Product '{prod_name}' successfully added to Turso cloud!")
+                    st.rerun()
+
+        with col_stock:
+            st.subheader("📦 Bulk Vault Restock")
+            products_list = get_data("SELECT product_id, name FROM products")
+
+            if not products_list.empty:
+                with st.form("bulk_stock_form"):
+                    product_options = {row['name']: row['product_id'] for _, row in products_list.iterrows()}
+                    selected_prod_name = st.selectbox("Select Target Product", list(product_options.keys()))
+                    selected_prod_id = product_options[selected_prod_name]
+
+                    stock_content = st.text_area("Paste Digital Keys/Links (One per line)")
+                    
+                    if st.form_submit_button("Secure Inventory"):
+                        if stock_content.strip():
+                            lines = [line.strip() for line in stock_content.split("\n") if line.strip()]
+                            conn = get_turso_connection()
+                            data_to_insert = [(selected_prod_id, line) for line in lines]
+                            conn.executemany("INSERT INTO inventory (product_id, content) VALUES (?, ?)", data_to_insert)
+                            conn.commit()
+                            conn.close()
+                            st.success(f"Successfully locked {len(lines)} stock items to {selected_prod_name}!")
+                        else:
+                            st.warning("Please paste at least one valid key.")
+            else:
+                st.info("Create a product first before adding stock.")
 
 # ==========================================
-# 3. ORDERS
+# 3. ORDERS (FULFILLMENT & GIFTING)
 # ==========================================
 elif selected == "Orders":
     st.markdown("<div class='eyebrow'>Fulfillment Log</div>", unsafe_allow_html=True)
-    st.title("Complete Order History")
-    st.markdown("View all fulfillment logs and delivered digital goods.")
+    st.title("Order & Fulfillment Management")
+    st.markdown("View past orders or manually gift a product key to a specific user.")
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    orders_df = get_data("SELECT * FROM orders ORDER BY purchased_at DESC LIMIT 100")
-    if not orders_df.empty:
-        st.dataframe(orders_df, use_container_width=True)
-    else:
-        st.info("No orders found in the database.")
+    tab_log, tab_gift = st.tabs(["Order History", "Manual Fulfill & Gift"])
+
+    with tab_log:
+        orders_df = get_data("SELECT * FROM orders ORDER BY purchased_at DESC LIMIT 100")
+        if not orders_df.empty:
+            st.dataframe(orders_df, use_container_width=True)
+        else:
+            st.info("No orders found in the database.")
+            
+    with tab_gift:
+        st.subheader("Manually Fulfill or Gift an Order")
+        st.markdown("Select a user and a product. This will pull **one unit** from your unsold stock, assign it to the user, and reveal the key so you can DM it to them. **(Their wallet balance will NOT be charged)**.")
+        
+        with st.form("manual_fulfill_form"):
+            target_user = st.number_input("Customer Telegram ID", min_value=1, step=1)
+            
+            # Get products list for dropdown
+            products_list = get_data("SELECT product_id, name FROM products WHERE is_active = 1")
+            
+            if not products_list.empty:
+                prod_dict = {row['name']: row['product_id'] for _, row in products_list.iterrows()}
+                selected_prod = st.selectbox("Select Product to Give", list(prod_dict.keys()))
+                prod_id = prod_dict[selected_prod]
+            else:
+                st.warning("No active products available.")
+                prod_id = None
+                
+            submit_gift = st.form_submit_button("Grant Access & Extract Key")
+            
+            if submit_gift and prod_id:
+                conn = get_turso_connection()
+                cursor = conn.cursor()
+                
+                # 1. Grab one unsold key from inventory
+                cursor.execute("SELECT item_id, content FROM inventory WHERE product_id = ? AND (is_sold = 0 OR is_sold IS NULL) LIMIT 1", (prod_id,))
+                stock_item = cursor.fetchone()
+                
+                if stock_item:
+                    item_id, delivered_content = stock_item
+                    
+                    # 2. Mark that specific item as sold
+                    cursor.execute("UPDATE inventory SET is_sold = 1 WHERE item_id = ?", (item_id,))
+                    
+                    # 3. Log to standard `orders` table
+                    cursor.execute("INSERT INTO orders (user_id, product_id, delivered_content) VALUES (?, ?, ?)", (target_user, prod_id, delivered_content))
+                    
+                    # 4. Attempt to log to `customer_orders` (the table used by the Bot's /myorders command)
+                    cursor.execute("SELECT price_usd FROM products WHERE product_id = ?", (prod_id,))
+                    price_row = cursor.fetchone()
+                    price = price_row[0] if price_row else 0.0
+                    try:
+                        cursor.execute("INSERT INTO customer_orders (user_id, product_name, price_usd, deliverable) VALUES (?, ?, ?, ?)", (target_user, selected_prod, price, delivered_content))
+                    except Exception:
+                        pass # Silently pass if this table doesn't exist yet
+                        
+                    conn.commit()
+                    st.success(f"🎉 Successfully fulfilled! {selected_prod} assigned to User {target_user}.")
+                    st.info(f"🔑 **Extracted Key/Link:** `{delivered_content}`\n\n*(Copy this key and DM it to the user)*")
+                else:
+                    st.error(f"❌ OUT OF STOCK: There are no unsold keys left for {selected_prod}.")
+                    
+                conn.close()
 
 # ==========================================
 # 4. USERS & BALANCES
