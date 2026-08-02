@@ -195,14 +195,25 @@ def init_cloud_db():
     Cached so it only runs ONCE when the app starts."""
     try:
         conn = get_turso_connection()
+        
+        # 1. ADDED SCHEMA: referred_by INTEGER
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 balance_usd REAL DEFAULT 0.0,
+                referred_by INTEGER,
                 registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # 2. MIGRATION FALLBACK: In case the users table already existed before this update, 
+        # this ensures the column is added without destroying existing data.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        except Exception:
+            pass # The column already exists, safe to ignore.
+            
         conn.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 product_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -600,11 +611,21 @@ elif selected == "Orders":
 elif selected == "Users & Balances":
     st.markdown("<div class='eyebrow'>Customer Ledger</div>", unsafe_allow_html=True)
     st.title("Customer Profiles & Balances")
-    st.markdown("Inspect registered customers and adjust wallet funds.")
+    st.markdown("Inspect registered customers, track referrals, and adjust wallet funds.")
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # Fixed explicit column selection query and hidden index to prevent column shifting
-    users_df = get_data("SELECT user_id, username, balance_usd, registered_at FROM users ORDER BY registered_at DESC LIMIT 100")
+    referral_query = """
+    SELECT 
+        u.user_id, 
+        u.username, 
+        u.balance_usd, 
+        (SELECT COUNT(*) FROM users r WHERE r.referred_by = u.user_id) AS total_referrals,
+        u.registered_at 
+    FROM users u 
+    ORDER BY u.registered_at DESC 
+    LIMIT 100
+    """
+    users_df = get_data(referral_query)
     if not users_df.empty:
         st.dataframe(users_df, use_container_width=True, hide_index=True)
 

@@ -104,7 +104,7 @@ class TopUpStates(StatesGroup):
 # 3. DATABASE, SUBSCRIPTION, & BROADCAST HELPERS
 # ==========================================
 def ensure_db_upgrades():
-    """Silently upgrades the SQLite database schema to support warranties, categories, orders, and restock notifications."""
+    """Silently upgrades the SQLite database schema to support warranties, categories, orders, restocks, and referrals."""
     try:
         with db._get_connection() as conn:
             try:
@@ -115,6 +115,11 @@ def ensure_db_upgrades():
                 conn.execute("ALTER TABLE products ADD COLUMN category TEXT DEFAULT 'General'")
             except Exception:
                 pass
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL")
+            except Exception:
+                pass
+            
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS restock_subscribers (
                     product_id INTEGER,
@@ -287,8 +292,8 @@ async def broadcast_to_users(bot: Bot, text: str, reply_markup: InlineKeyboardMa
             
     logging.info(f"📣 Private DM broadcast successfully delivered to {success_count}/{len(user_ids)} users.")
 
-async def safe_register_user(user_id: int, username: str) -> str:
-    """Registers user safely, handles the Turso race condition, and applies promo."""
+async def safe_register_user(user_id: int, username: str, referrer_id: int = None) -> str:
+    """Registers user safely, handles the Turso race condition, applies promos, and securely tracks referrals."""
     existing_user = await asyncio.to_thread(db.get_user, user_id)
     
     if existing_user:
@@ -305,7 +310,23 @@ async def safe_register_user(user_id: int, username: str) -> str:
     # 2. Pause for 0.5s to ensure the Turso cloud DB fully commits the INSERT
     await asyncio.sleep(0.5)
 
-    # 3. Apply the promo if eligible
+    # 3. Handle Referral Logic securely
+    if referrer_id and referrer_id != user_id:
+        # Verify the referrer is an actual registered user in the DB before crediting any funds
+        referrer_data = await asyncio.to_thread(db.get_user, referrer_id)
+        
+        if referrer_data:
+            with db._get_connection() as conn:
+                conn.execute("UPDATE users SET referred_by = ? WHERE user_id = ?", (referrer_id, user_id))
+                conn.commit()
+                
+            reward_amount = 0.50 # Referral Reward Setting
+            await asyncio.to_thread(add_user_balance, user_id=referrer_id, amount_usd=reward_amount)
+            
+            # Return a special flag so we can notify the referrer in the command handler
+            return f"new_referred_{referrer_id}_{reward_amount}"
+
+    # 4. Apply the promo if eligible
     if total_users < 100:
         await asyncio.to_thread(add_user_balance, user_id=user_id, amount_usd=1.0)
         return "promo"
@@ -323,13 +344,13 @@ def get_persistent_restart_keyboard() -> ReplyKeyboardMarkup:
         is_persistent=True
     )
 
-
 def get_main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
     """Returns the primary storefront navigation menu."""
     buttons = [
         [InlineKeyboardButton(text="🛍️ View Catalog", callback_data="menu_catalog")],
         [InlineKeyboardButton(text="💳 Top-Up Wallet Balance", callback_data="menu_topup")],
         [InlineKeyboardButton(text="👤 My Profile & Balance", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="🎁 Invite Friends", callback_data="menu_referral")],
         [InlineKeyboardButton(text="❓ Help & Support", callback_data="menu_help")]
     ]
     
@@ -483,8 +504,8 @@ async def check_low_stock_watcher(bot: Bot):
 # 6. NAVIGATION & MENU HANDLERS
 # ==========================================
 @router.message(Command("start"), ThrottlingFilter())
-async def cmd_start(message: types.Message, state: FSMContext):
-    """Register user on startup, grant promo balance if eligible, and display main menu."""
+async def cmd_start(message: types.Message, state: FSMContext, command: CommandObject = None):
+    """Register user on startup, handle referral deep linking, and display main menu."""
     await state.clear()
     
     await message.answer(
@@ -511,7 +532,36 @@ async def cmd_start(message: types.Message, state: FSMContext):
             )
             return
 
-    status = await safe_register_user(message.from_user.id, message.from_user.username)
+    # Extract optional referral ID from deep link (e.g., t.me/bot?start=123456)
+    referrer_id = None
+    if command and command.args:
+        try:
+            referrer_id = int(command.args)
+        except ValueError:
+            pass
+
+    status = await safe_register_user(message.from_user.id, message.from_user.username, referrer_id)
+
+    # Handle Referral Reward Notification
+    if status.startswith("new_referred_"):
+        parts = status.split("_")
+        actual_referrer_id = int(parts[2])
+        reward_amount = float(parts[3])
+        
+        try:
+            await message.bot.send_message(
+                chat_id=actual_referrer_id,
+                text=(
+                    f"🎉 **Referral Success!**\n\n"
+                    f"Someone just joined Altalis & Celesta using your invite link. "
+                    f"**${reward_amount:.2f} USD** has been automatically deposited into your wallet balance!\n\n"
+                    f"Keep sharing your link from the **🎁 Invite Friends** menu to earn more!"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.warning(f"Could not send reward notification to referrer {actual_referrer_id}: {e}")
+        status = "new"
 
     if status == "promo":
         welcome_msg = (
@@ -539,6 +589,26 @@ async def cmd_start(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
+@router.callback_query(F.data == "menu_referral", ThrottlingFilter())
+async def cb_menu_referral(callback: types.CallbackQuery, state: FSMContext):
+    """Generate and display the user's unique referral link."""
+    await state.clear()
+    
+    bot_info = await callback.bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={callback.from_user.id}"
+    
+    text = (
+        f"🤝 **Invite Friends & Earn!**\n\n"
+        f"Share your unique link below. When a new user starts the bot using your link, "
+        f"you will automatically receive **$0.50 USD** directly into your wallet balance!\n\n"
+        f"🔗 `{ref_link}`"
+    )
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="« Back to Main Menu", callback_data="menu_main")]]
+    )
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 @router.message(Command("restart", "menu", "home"), ThrottlingFilter())
 @router.message(F.text == "🔄 Restart / Menu", ThrottlingFilter())
@@ -1987,7 +2057,7 @@ async def main():
     # ---------------------------------------------------------
     crypto = AioCryptoPay(token=crypto_token, network=network_mode)
 
-    # SILENT DB UPGRADE: Automatically adds database tables for warranties, categories, orders, and restocks
+    # SILENT DB UPGRADE: Automatically adds database tables for warranties, categories, orders, restocks, and referrals
     ensure_db_upgrades()
     
     bot_token = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
