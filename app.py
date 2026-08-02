@@ -426,7 +426,26 @@ elif selected == "Products & Stock":
     tab1, tab2, tab3 = st.tabs(["Active Catalog", "Add New Product / Stock", "Edit Product"])
 
     with tab1:
-        products_df = get_data("SELECT * FROM products")
+        # UPDATED SQL QUERY TO INCLUDE STOCK
+        query = """
+            SELECT 
+                p.product_id, 
+                p.name, 
+                p.description, 
+                p.price_usd, 
+                p.is_active, 
+                p.warranty, 
+                p.category,
+                COUNT(i.item_id) AS stock
+            FROM products p
+            LEFT JOIN inventory i 
+                ON p.product_id = i.product_id 
+                AND (i.is_sold = 0 OR i.is_sold IS NULL)
+            GROUP BY 
+                p.product_id, p.name, p.description, p.price_usd, p.is_active, p.warranty, p.category;
+        """
+        products_df = get_data(query)
+        
         if not products_df.empty:
             st.dataframe(products_df, use_container_width=True, hide_index=True)
         else:
